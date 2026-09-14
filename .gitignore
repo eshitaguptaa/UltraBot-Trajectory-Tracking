@@ -1,0 +1,14 @@
+dataset/
+BUSV_Dataset/
+yolov13/runs/
+runs/
+*.pt
+*.pth
+outputs/**/*.mp4
+outputs/**/*.gif
+outputs/**/*.png
+__pycache__/
+.ipynb_checkpoints/
+.venv/
+venv/
+.env

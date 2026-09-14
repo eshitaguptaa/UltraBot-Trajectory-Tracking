@@ -1,0 +1,7 @@
+path: D:/VS CODE/machine Learning/deep learning/yolo/project4/dataset
+train: images/train
+val: images/val
+
+names:
+  0: benign
+  1: malignant
