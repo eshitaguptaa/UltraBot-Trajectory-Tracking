@@ -12,3 +12,10 @@ __pycache__/
 .venv/
 venv/
 .env
+*.pt
+*.pth
+!models/best.pt
+!models/lstm_checkpoint.pth
+!yolov8n.pt
+outputs/**/*.mp4
+!outputs/input.mp4
