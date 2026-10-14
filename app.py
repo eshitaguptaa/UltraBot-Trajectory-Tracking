@@ -12,7 +12,24 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-ROOT = Path(__file__).resolve().parent
+from ultrabot.pipeline import (
+    DEFAULT_OUTPUT,
+    DEFAULT_VIDEO,
+    LSTM_CHECKPOINT,
+    YOLO_WEIGHTS,
+    check_model_availability,
+    generate_synthetic_pipeline_result,
+    get_lstm_checkpoint_path,
+    get_project_root,
+    get_yolo_weights_path,
+    load_models,
+    run_pipeline,
+    safe_load_models,
+    validate_lstm_checkpoint,
+    validate_yolo_weights,
+)
+
+ROOT = get_project_root()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -26,9 +43,13 @@ from ultrabot.biopsy import (
     suggested_defaults,
 )
 from ultrabot.metrics import compute_run_metrics
-from ultrabot.pipeline import LSTM_CHECKPOINT, YOLO_WEIGHTS, load_models, run_pipeline
 from ultrabot.render import OUT_H, VIDEO_W
 from ultrabot.robot_sim import ROBOT_DISCLAIMER, render_robot_frame, run_robot_simulation
+
+try:
+    from robotics.streamlit_3d_panel import render_3d_simulation_panel
+except ImportError:
+    render_3d_simulation_panel = None
 
 UPLOAD_DIR = ROOT / "outputs" / "uploads"
 DASH_DIR = ROOT / "outputs" / "dashboard"
@@ -58,8 +79,8 @@ def _list_sample_videos():
 
 
 @st.cache_resource
-def get_models():
-    return load_models(YOLO_WEIGHTS, LSTM_CHECKPOINT)
+def get_models(w_path=None, l_path=None):
+    return load_models(w_path, l_path)
 
 
 def _save_upload(upload) -> Path:
@@ -821,77 +842,65 @@ def _render_virtual_biopsy(last, plan, pane, frame_idx):
 
 
 @st.fragment
-def _render_robot_simulation():
+def _render_robot_simulation(pipeline_result=None):
     st.markdown(f'<div class="note">{ROBOT_DISCLAIMER}</div>', unsafe_allow_html=True)
-    nav = st.session_state.get("robot_nav")
-    ctx = st.session_state.get("robot_sim_ctx")
-    payload = nav if nav and nav.get("recommended") is not None else None
-    live_rec = None if not ctx else ctx.get("recommended")
-    rec = None if payload is None else payload.get("recommended")
-    if rec is None:
-        if live_rec is None:
-            st.warning("No recommended trajectory. Open Trajectory Planning after a feasible optimizer result, then click NAVIGATE RECOMMENDED PATH.")
-            return
-        st.info("A recommended path is available. Click NAVIGATE RECOMMENDED PATH in Trajectory Planning to send that exact path here.")
-        preview = render_robot_frame(ctx["pane"], live_rec, 0.0, status_label="PLANNED")
-        st.image(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB), caption="Live optimizer path (not yet navigated)", width="stretch")
-        return
+    is_synth = pipeline_result.get("is_synthetic", False) if isinstance(pipeline_result, dict) else True
+    mode = "full" if (pipeline_result is not None and not is_synth) else "synthetic"
 
-    pane = payload["pane"]
-    preview = render_robot_frame(pane, rec, 0.0, status_label="PLANNED")
-    DASH_DIR.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(DASH_DIR / "robot_sim_planned.png"), preview)
-    drifted = live_rec is not None and payload.get("path_key") != _recommended_key(live_rec)
-    left, right = st.columns([1.3, 1])
-    with left:
-        st.image(
-            cv2.cvtColor(preview, cv2.COLOR_BGR2RGB),
-            caption=f"Entry → trajectory → lesion target · frame {payload.get('frame_index')}",
-            width="stretch",
-        )
-    with right:
-        st.caption("Robot follows the captured optimizer recommended path, not the manual Advanced-options path.")
-        a, b = st.columns(2)
-        a.metric("Path length", f"{rec['path_length']:.1f} px")
-        b.metric("Needle angle", f"{rec['needle_angle_deg']:.1f}°")
-        c, d = st.columns(2)
-        c.metric("Target error", "—" if rec["target_error"] is None else f"{rec['target_error']:.1f} px")
-        d.metric("Safety violations", rec["safety_violations"])
-        e, f = st.columns(2)
-        e.metric("Feasible", "Yes" if rec["feasible"] else "No")
-        f.metric("Entry", f"({rec['entry'][0]:.0f}, {rec['entry'][1]:.0f})")
-        replay = st.button("REPLAY NEEDLE INSERTION", width="stretch")
-    if drifted:
-        st.caption("Planning weights changed the live recommended path. Click NAVIGATE RECOMMENDED PATH again to send the new path.")
-    if replay:
-        with st.spinner("Inserting virtual needle…"):
-            _run_recommended_navigation(payload)
-    sim = st.session_state.get("robot_sim_result")
-    if sim and sim.get("path_key") == payload.get("path_key"):
-        cls = "sim-ok" if sim["success"] else "sim-bad"
-        nav_status = sim.get("navigation_status") or sim["status_label"]
-        st.markdown(f'<div class="{cls}"><b>{sim["status_label"]}</b> — {sim["status_reason"]}</div>', unsafe_allow_html=True)
-        s1, s2, s3 = st.columns(3)
-        s1.metric("Navigation status", nav_status)
-        s2.metric("Path length", f"{sim['path_length']:.1f} px")
-        s3.metric("Needle angle", f"{sim['needle_angle_deg']:.1f}°")
-        t1, t2, t3 = st.columns(3)
-        t1.metric("Target error", "—" if sim.get("target_error") is None else f"{sim['target_error']:.1f} px")
-        t2.metric("Safety violations", sim.get("safety_violations"))
-        t3.metric("Feasible", "Yes" if sim.get("feasible") else "No")
-        u1, u2, u3 = st.columns(3)
-        u1.metric("Tip → target", f"{sim['tip_to_target_px']:.1f} px")
-        u2.metric("Safety margin", f"{sim['safety_margin_px']:.1f} px")
-        u3.metric("Result", sim["status_label"])
-        gif_path = Path(sim["gif_path"])
-        if gif_path.exists():
-            st.image(str(gif_path), caption="Virtual needle along the recommended path", width="stretch")
-        st.caption(
-            f"Entry {_fmt_pt(sim['entry'])} → target {_fmt_pt(sim['target'])} · "
-            f"final tip {_fmt_pt(sim['final_tip'])} · traveled {sim['traveled_px']:.1f} px"
-        )
-    elif not replay:
-        st.caption("Navigate from Trajectory Planning to animate this recommended path.")
+    # Main Area: Interactive 3D Articulated Robot Arm Simulation
+    if render_3d_simulation_panel is not None:
+        render_3d_simulation_panel(pipeline_result=pipeline_result, mode=mode)
+    else:
+        st.error("Robotics 3D simulation module not available.")
+
+    # Optional Collapsible Reference: 2D Ultrasound Trajectory Overlay
+    with st.expander("🖼️ 2D Ultrasound Trajectory Reference", expanded=False):
+        nav = st.session_state.get("robot_nav")
+        ctx = st.session_state.get("robot_sim_ctx")
+        payload = nav if nav and nav.get("recommended") is not None else None
+        live_rec = None if not ctx else ctx.get("recommended")
+        rec = None if payload is None else payload.get("recommended")
+        if rec is None:
+            if live_rec is not None:
+                st.info("A recommended path is available. Click NAVIGATE RECOMMENDED PATH in Trajectory Planning to send that exact path here.")
+                preview = render_robot_frame(ctx["pane"], live_rec, 0.0, status_label="PLANNED")
+                st.image(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB), caption="Live optimizer path (not yet navigated)", width="stretch")
+            else:
+                st.caption("No recommended 2D trajectory captured yet.")
+        else:
+            pane = payload["pane"]
+            preview = render_robot_frame(pane, rec, 0.0, status_label="PLANNED")
+            DASH_DIR.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(DASH_DIR / "robot_sim_planned.png"), preview)
+            drifted = live_rec is not None and payload.get("path_key") != _recommended_key(live_rec)
+            left, right = st.columns([1.3, 1])
+            with left:
+                st.image(
+                    cv2.cvtColor(preview, cv2.COLOR_BGR2RGB),
+                    caption=f"Entry → trajectory → lesion target · frame {payload.get('frame_index')}",
+                    width="stretch",
+                )
+            with right:
+                st.caption("Robot follows the captured optimizer recommended path.")
+                a, b = st.columns(2)
+                a.metric("Path length", f"{rec['path_length']:.1f} px")
+                b.metric("Needle angle", f"{rec['needle_angle_deg']:.1f}°")
+                c, d = st.columns(2)
+                c.metric("Target error", "—" if rec["target_error"] is None else f"{rec['target_error']:.1f} px")
+                d.metric("Safety violations", rec["safety_violations"])
+                replay = st.button("REPLAY 2D NEEDLE INSERTION", width="stretch")
+            if drifted:
+                st.caption("Planning weights changed the live recommended path. Click NAVIGATE RECOMMENDED PATH again to send the new path.")
+            if replay:
+                with st.spinner("Inserting virtual needle…"):
+                    _run_recommended_navigation(payload)
+            sim = st.session_state.get("robot_sim_result")
+            if sim and sim.get("path_key") == payload.get("path_key"):
+                cls = "sim-ok" if sim["success"] else "sim-bad"
+                st.markdown(f'<div class="{cls}"><b>{sim["status_label"]}</b> — {sim["status_reason"]}</div>', unsafe_allow_html=True)
+                gif_path = Path(sim["gif_path"])
+                if gif_path.exists():
+                    st.image(str(gif_path), caption="Virtual needle along the recommended path", width="stretch")
 
 
 def _experiment_table(result, metrics, rec, sim):
@@ -960,6 +969,7 @@ def main():
     _inject_css()
     _header()
 
+    model_status = check_model_availability(YOLO_WEIGHTS, LSTM_CHECKPOINT)
     samples = _list_sample_videos()
     sample_labels = {str(p): f"{p.name}  ({p.parent.name})" for p in samples}
 
@@ -980,22 +990,86 @@ def main():
 
         max_frames = st.slider("Max frames (0 = all)", 0, 400, 100, 10)
 
-        _sidebar_label("DETECTOR")
-        st.markdown("**YOLO Detector**")
+        _sidebar_label("DETECTOR & WEIGHTS")
+        if model_status["yolo_available"]:
+            st.markdown("🟢 **YOLO Detector**: Ready")
+        else:
+            st.markdown("⚠️ **YOLO Detector**: Weights Missing")
+            st.caption(f"Required: `{Path(model_status['yolo_path']).name}`")
+
+        if model_status["lstm_available"]:
+            st.markdown("🟢 **LSTM Predictor**: Ready")
+        else:
+            st.markdown("⚠️ **LSTM Predictor**: Checkpoint Missing")
+            st.caption(f"Required: `{Path(model_status['lstm_path']).name}`")
+
         conf = st.slider("Confidence", 0.05, 0.80, 0.10, 0.05)
-        detector_label = "YOLO Detector"
 
         _sidebar_label("ACTION")
-        run_clicked = st.button("RUN ANALYSIS", type="primary", width="stretch", disabled=video_path is None)
+        can_run_real = (video_path is not None) and model_status["all_available"]
+        run_real_clicked = st.button(
+            "RUN REAL AI INFERENCE",
+            type="primary" if can_run_real else "secondary",
+            width="stretch",
+            disabled=not can_run_real,
+            help=(
+                "Run real YOLOv8 detection and LSTM prediction on the video."
+                if can_run_real
+                else "Real AI inference is disabled: requires video and trained models/best.pt + models/lstm_checkpoint.pth."
+            ),
+        )
+        run_synthetic_clicked = st.button(
+            "RUN SYNTHETIC SIMULATION DEMO",
+            type="primary" if not can_run_real else "secondary",
+            width="stretch",
+            help="Generate an end-to-end simulated ultrasound demonstration without AI weights.",
+        )
+        if st.session_state.get("result"):
+            if st.button("RESET TO STANDBY", width="stretch"):
+                st.session_state.pop("result", None)
+                st.session_state.pop("robot_sim_result", None)
+                st.session_state.pop("robot_sim_ctx", None)
+                st.session_state.pop("robot_nav", None)
+                st.rerun()
 
-    if run_clicked and video_path is not None:
+    # Model status alert if real AI weights are missing
+    if not model_status["all_available"]:
+        st.warning(
+            "⚠️ **Real AI Models Not Loaded — Synthetic Simulation Mode Active**\n\n"
+            + (f"• **YOLO Weights**: {model_status['yolo_message']}\n\n" if not model_status["yolo_available"] else "")
+            + (f"• **LSTM Checkpoint**: {model_status['lstm_message']}\n\n" if not model_status["lstm_available"] else "")
+            + "Real AI inference is disabled until model weights are placed in the `models/` folder. "
+            "The UltraBot interface, 3D Robot Simulation tab, and synthetic demo mode are fully functional below."
+        )
+
+    # Handle synthetic demo trigger
+    if run_synthetic_clicked:
+        DASH_DIR.mkdir(parents=True, exist_ok=True)
+        with st.spinner("Generating synthetic ultrasound simulation…"):
+            pipe = generate_synthetic_pipeline_result(
+                output_path=DASH_DIR / "synthetic_demo.mp4",
+                preview_path=DASH_DIR / "synthetic_demo_preview.png",
+                num_frames=60,
+            )
+            st.session_state["result"] = pipe.to_dict()
+            st.session_state.pop("robot_sim_result", None)
+            st.session_state.pop("robot_sim_ctx", None)
+            st.session_state.pop("robot_nav", None)
+            st.rerun()
+
+    # Handle real AI inference trigger
+    if run_real_clicked and video_path is not None:
+        if not model_status["all_available"]:
+            st.error("Cannot run real AI inference: model weights are missing. Run the synthetic demo instead.")
+            return
+
         DASH_DIR.mkdir(parents=True, exist_ok=True)
         run_slot = st.empty()
         with run_slot.container():
             st.markdown(_pipeline_html(running=True), unsafe_allow_html=True)
             progress = st.progress(0, text="Loading models…")
         try:
-            models = get_models()
+            models = get_models(YOLO_WEIGHTS, LSTM_CHECKPOINT)
 
             def _cb(cur, total, det):
                 progress.progress(min(1.0, cur / max(total, 1)), text=f"Frame {cur}/{total} · detections {det}")
@@ -1018,14 +1092,112 @@ def main():
         except Exception as exc:
             run_slot.empty()
             st.error(f"Pipeline failed: {exc}")
-            return
+            # Do not return here to avoid hiding the UI
+            pass
 
     result = st.session_state.get("result")
     if not result:
         st.markdown(_pipeline_html(running=False), unsafe_allow_html=True)
-        st.caption("Select a video under DATA and click RUN ANALYSIS.")
+
+        st.markdown(
+            """
+            <div style="background: #101923; border: 1px solid #1f2d3d; border-radius: 8px; padding: 18px; margin-bottom: 20px;">
+                <h3 style="color: #7bdff2; margin-top: 0; margin-bottom: 8px;">UltraBot — Autonomous Robotic Ultrasound Biopsy Guidance</h3>
+                <p style="color: #c5d0da; font-size: 14px; margin-bottom: 8px;">
+                    UltraBot integrates real-time tumor detection, temporal tracking, LSTM motion prediction, 
+                    safety-constrained biopsy trajectory optimization, and 3D robotic arm simulation.
+                </p>
+                <div style="color: #8b949e; font-size: 13px;">
+                    💡 <b>Getting Started:</b> Switch to <b>Tab 7: 3D Robot Simulation</b> below to test synthetic robotic control and kinematics anytime, 
+                    or click <b>RUN SYNTHETIC SIMULATION DEMO</b> in the sidebar to simulate full end-to-end trajectory planning.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        tabs = st.tabs(
+            [
+                "Overview",
+                "Detection & Tracking",
+                "Temporal Prediction",
+                "Trajectory Planning",
+                "Virtual Biopsy",
+                "Robot Simulation",
+            ]
+        )
+
+        with tabs[0]:
+            st.subheader("System Architecture & Pipeline Flow")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.markdown("#### 1. Real-Time Detection")
+                st.write("YOLO detector identifies lesion bounding boxes and classes (`benign` / `malignant`).")
+            with c2:
+                st.markdown("#### 2. Temporal Association")
+                st.write("Greedy IoU and center-distance tracker forms consistent lesion tracks across frames.")
+            with c3:
+                st.markdown("#### 3. Motion Prediction")
+                st.write("3-layer LSTM forecasts lesion velocity to compensate for respiratory motion.")
+
+            c4, c5, c6 = st.columns(3)
+            with c4:
+                st.markdown("#### 4. Trajectory Optimization")
+                st.write("Evaluates candidate entry-to-target paths, filtering for reachability and safety margin.")
+            with c5:
+                st.markdown("#### 5. Virtual Biopsy")
+                st.write("Simulates virtual needle insertion and alignment against tracked tumor targets.")
+            with c6:
+                st.markdown("#### 6. 3D Robotic Workspace")
+                st.write("Transforms 2D ultrasound coordinates to 3D robot workspace coordinates for manipulator control.")
+
+        with tabs[1]:
+            st.subheader("YOLOv8 Lesion Detection & Temporal Tracking")
+            st.info("Select a video from the sidebar and click **RUN REAL AI INFERENCE** (when weights are present) or **RUN SYNTHETIC SIMULATION DEMO** to view live detection bounding boxes and tracking IDs.")
+            if samples:
+                st.write(f"Available sample videos in workspace: {', '.join(f'`{p.name}`' for p in samples)}")
+
+        with tabs[2]:
+            st.subheader("LSTM Motion Prediction")
+            st.markdown(
+                "The temporal prediction module uses a 3-layer LSTM network with hidden dimension 128 "
+                "operating on normalized coordinate displacement sequences."
+            )
+
+        with tabs[3]:
+            st.subheader("Trajectory Planning Workspace (Standby)")
+            st.caption("Sample trajectory calculation using baseline tumor target:")
+            sample_opt = optimize_biopsy_paths(
+                lesion=(480, 340),
+                predicted=(495, 335),
+                user_target=None,
+                safety_margin_px=24.0,
+                needle_length_px=400.0,
+            )
+            sample_plan = plan_biopsy(
+                entry=(480, 50),
+                target=(480, 340),
+                lesion=(480, 340),
+                predicted=(495, 335),
+            )
+            st.plotly_chart(_candidate_path_figure(sample_opt, sample_plan, 320), width="stretch", key="sb_path")
+
+        with tabs[4]:
+            st.subheader("Virtual Biopsy Simulation")
+            st.caption("Interactive needle reach and safety margin validation are configured per target.")
+
+        with tabs[5]:
+            _render_robot_simulation(pipeline_result=None)
+
         _footer()
         return
+
+    is_synth = result.get("is_synthetic", False)
+    if is_synth:
+        st.info("🧪 **SYNTHETIC SIMULATION DEMO** — Displaying simulated ultrasound targets and synthetic trajectory. Real AI inference was not run.")
+        detector_label = "Synthetic Generator (Demo)"
+    else:
+        detector_label = "YOLO Detector (Real Inference)"
 
     metrics = compute_run_metrics(result)
     records = result["records"]
@@ -1152,7 +1324,7 @@ def main():
         _render_virtual_biopsy(last, plan, pane, frame_idx)
 
     with tabs[5]:
-        _render_robot_simulation()
+        _render_robot_simulation(pipeline_result=result)
 
     with st.expander("How to read these numbers"):
         for item in metrics["notes"]:

@@ -1,0 +1,1 @@
+timestamp,frame,detected_x,detected_y,predicted_x,predicted_y,world_x,world_y,world_z,approach_x,approach_y,approach_z,robot_x,robot_y,robot_z,target_error_3d_m,target_error_2d_px,planning_time_sec,robot_state,success,yolo_confidence,filter_accepted,filter_reason

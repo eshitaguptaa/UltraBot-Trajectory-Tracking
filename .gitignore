@@ -19,3 +19,8 @@ venv/
 !yolov8n.pt
 outputs/**/*.mp4
 !outputs/input.mp4
+
+# Python cache and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/

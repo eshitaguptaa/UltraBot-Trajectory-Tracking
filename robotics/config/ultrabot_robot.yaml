@@ -1,0 +1,104 @@
+# ============================================================
+# UltraBot 3D Robotic Simulation Configuration
+# ============================================================
+#
+# DISCLAIMER: Pixel-to-world mapping is a simulation
+# approximation and is NOT a clinically calibrated ultrasound
+# coordinate system. This file controls a research simulation
+# only and must NOT be used to configure real medical hardware.
+# ============================================================
+
+# --- Image / Frame dimensions ---
+image:
+  width: 990       # VIDEO_W from ultrabot/render.py (OUT_W - SIDEBAR_W = 1280 - 290)
+  height: 720      # OUT_H from ultrabot/render.py
+
+# --- Simulated 3D Workspace (metres) ---
+# The ultrasound image plane is mapped linearly into this box.
+# These values define the physical extent of the tissue phantom
+# in the robot's base frame (right-hand convention, Z-up).
+workspace:
+  x_min: -0.15     # metres (left edge of phantom)
+  x_max:  0.15     # metres (right edge of phantom)
+  y_min: -0.15     # metres (top edge of phantom → -Y in image convention)
+  y_max:  0.15     # metres (bottom edge of phantom)
+  z_min: -0.12     # metres (deep tissue, below surface)
+  z_max:  0.00     # metres (phantom surface)
+
+# --- Simulated lesion depth ---
+# A fixed depth is used because monocular ultrasound does NOT
+# provide reliable 3D depth.  This is clearly a simulation.
+lesion_depth: -0.05   # metres below phantom surface
+
+# --- Approach offset ---
+# The robot moves to an approach pose ABOVE the target before
+# descending. This prevents any simulated tissue penetration
+# in the default safe-demo mode.
+approach_offset_m: 0.08   # metres along the tool Z-axis
+
+# --- Phantom description ---
+phantom:
+  origin_x:  0.50   # metres from robot base (in robot base_link frame)
+  origin_y:  0.00
+  origin_z:  0.30   # table height
+  radius:    0.12   # hemisphere radius (m) — for collision geometry
+  label: "Tissue Phantom (Research Simulation Only)"
+
+# --- Robot description ---
+robot:
+  type: "UR5e"               # Preferred; fall back to Franka Panda if unavailable
+  base_frame: "base_link"
+  tool_frame: "tool0"
+  planning_group: "manipulator"
+  max_velocity_scaling: 0.3
+  max_acceleration_scaling: 0.2
+
+# --- Coordinate transform ---
+# Phantom origin relative to robot base_link (metres)
+transform:
+  phantom_x_in_robot_frame: 0.50
+  phantom_y_in_robot_frame: 0.00
+  phantom_z_in_robot_frame: 0.30
+
+# --- Target stability filter ---
+filter:
+  ema_alpha: 0.35              # EMA smoothing (0=no change, 1=instant follow)
+  min_confidence: 0.25         # Reject YOLO detections below this
+  max_jump_m: 0.04             # Max allowed single-step 3D target change (m)
+  min_movement_threshold_m: 0.003  # Don't replan if target moves < 3 mm
+
+# --- Planning policy ---
+planning:
+  command_hz: 2.0              # Max MoveIt command frequency (Hz)
+  max_planning_attempts: 5
+  planning_timeout_sec: 5.0
+  workspace_validation: true   # Validate target inside workspace before sending
+
+# --- Logging ---
+logging:
+  csv_path: "robotics/logs/ultrabot_robot_log.csv"
+  enabled: true
+
+# --- ROS namespace ---
+ros:
+  namespace: "/ultrabot"
+  detection_topic: "/ultrabot/detection"
+  prediction_topic: "/ultrabot/prediction"
+  biopsy_target_topic: "/ultrabot/biopsy_target"
+  target_pose_topic: "/ultrabot/target_pose"
+  robot_status_topic: "/ultrabot/robot_status"
+  current_lesion_marker_topic: "/ultrabot/current_lesion_marker"
+  predicted_lesion_marker_topic: "/ultrabot/predicted_lesion_marker"
+
+# --- Gazebo ---
+gazebo:
+  world_file: "robotics/ros2_ws/src/ultrabot_gazebo/worlds/ultrabot_world.world"
+  robot_spawn_x: 0.0
+  robot_spawn_y: 0.0
+  robot_spawn_z: 0.0
+
+# --- Fallback simulation (matplotlib 3D) ---
+fallback:
+  enabled_if_no_ros: true
+  animation_interval_ms: 100
+  show_workspace_box: true
